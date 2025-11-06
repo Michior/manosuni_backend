@@ -1,9 +1,15 @@
 import { Router } from 'express';
-import { listVolunteers, updateVolunteer } from '../controllers/ngoVolunteersController.js';
+import {
+    listVolunteersByActivity,
+    markEnrollmentStatus,
+} from '../controllers/ngoVolunteersController.js';
 
 const router = Router();
 
-router.get('/', listVolunteers);
-router.patch('/:enrollment_id', updateVolunteer);
+
+router.get('/', listVolunteersByActivity);
+
+
+router.put('/:enrollment_id', markEnrollmentStatus);
 
 export default router;

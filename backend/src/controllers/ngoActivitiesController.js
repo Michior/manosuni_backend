@@ -1,106 +1,186 @@
-import { pool } from '../config/db.js';
+import pool from '../config/db.js';
 
 
-export const listActivities = async (req, res) => {
+const parsePage = (v, def) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : def;
+};
+
+export async function listActivities(req, res, next) {
     try {
-        const { status, ngo_id, q, page = 1, limit = 10 } = req.query;
-        const p = Math.max(1, Number(page));
-        const l = Math.max(1, Math.min(100, Number(limit)));
-        const offset = (p - 1) * l;
+        const {
+            status,
+            ngo_id,
+            q,
+            page = 1,
+            limit = 10,
+        } = req.query;
+
+        const p = parsePage(page, 1);
+        const l = parsePage(limit, 10);
+        const off = (p - 1) * l;
 
         const where = [];
         const params = [];
+        let i = 1;
 
-        if (status) { params.push(status); where.push(`a.status = $${params.length}`); }
-        if (ngo_id) { params.push(Number(ngo_id)); where.push(`a.ngo_id = $${params.length}`); }
-        if (q) { params.push(`%${q}%`); where.push(`(a.title ILIKE $${params.length} OR a.description ILIKE $${params.length})`); }
+        if (ngo_id) {
+            where.push(`a.ngo_id = $${i++}`);
+            params.push(Number(ngo_id));
+        }
+        if (status) {
+            where.push(`a.status = $${i++}`);
+            params.push(status);
+        }
+        if (q) {
+            where.push(`(a.title ILIKE $${i} OR a.description ILIKE $${i})`);
+            params.push(`%${q}%`);
+            i++;
+        }
 
         const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-        const baseSql = `
+
+        const sql = `
+      SELECT a.activity_id, a.ngo_id, a.title, a.description, a.category,
+             a.modality, a.start_datetime, a.end_datetime, a.hours_value,
+             a.capacity, a.status, a.created_at, a.updated_at,
+             COALESCE(enr.enrolled_count, 0) AS enrolled_count
       FROM activities a
-      LEFT JOIN ngos n ON n.ngo_id = a.ngo_id
+      LEFT JOIN (
+        SELECT activity_id, COUNT(*) AS enrolled_count
+        FROM enrollments
+        WHERE status IN ('enrolled','completed')
+        GROUP BY activity_id
+      ) enr ON enr.activity_id = a.activity_id
       ${whereSql}
+      ORDER BY a.start_datetime ASC
+      LIMIT ${l} OFFSET ${off};
     `;
 
-        const totalSql = `SELECT COUNT(*) AS total ${baseSql};`;
-        const dataSql = `
-      SELECT a.activity_id, a.title, a.description, a.category, a.modality,
-             a.start_datetime, a.end_datetime, a.hours_value, a.capacity,
-             a.status, a.ngo_id, n.name AS ngo_name
-      ${baseSql}
-      ORDER BY a.start_datetime DESC
-      LIMIT $${params.length + 1} OFFSET $${params.length + 2};
+        const totalSql = `
+      SELECT COUNT(*)::int AS total
+      FROM activities a
+      ${whereSql};
     `;
 
-        const totalRes = await pool.query(totalSql, params);
-        const dataRes = await pool.query(dataSql, [...params, l, offset]);
+        const [rows, totalRows] = await Promise.all([
+            pool.query(sql, params),
+            pool.query(totalSql, params),
+        ]);
 
-        res.json({
+        return res.json({
             ok: true,
             page: p,
             limit: l,
-            total: Number(totalRes.rows[0].total),
-            data: dataRes.rows,
+            total: totalRows.rows[0]?.total ?? 0,
+            data: rows.rows,
         });
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ ok: false, error: 'Internal Server Error', detail: err.message });
+        next(err);
     }
-};
+}
 
-
-export const createActivity = async (req, res) => {
+export async function createActivity(req, res, next) {
     try {
         const {
-            ngo_id, title, description, category, modality = 'onsite',
-            start_datetime, end_datetime, hours_value = 0, capacity = null, status = 'open',
+            ngo_id,
+            title,
+            description,
+            category,
+            modality,
+            start_datetime,
+            end_datetime,
+            hours_value,
+            capacity,
+            status = 'draft',
         } = req.body;
 
-        if (!ngo_id || !title || !start_datetime) {
-            return res.status(400).json({ ok: false, error: 'ngo_id, title y start_datetime son requeridos' });
+        if (!ngo_id || !title || !start_datetime || !end_datetime) {
+            return res.status(400).json({ ok: false, error: 'Missing required fields' });
         }
 
         const sql = `
       INSERT INTO activities
-      (ngo_id, title, description, category, modality, start_datetime, end_datetime, hours_value, capacity, status)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        (ngo_id, title, description, category, modality,
+         start_datetime, end_datetime, hours_value, capacity, status)
+      VALUES
+        ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
       RETURNING *;
     `;
-        const params = [ngo_id, title, description, category, modality, start_datetime, end_datetime, hours_value, capacity, status];
-        const r = await pool.query(sql, params);
-
-        res.status(201).json({ ok: true, activity: r.rows[0] });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ ok: false, error: 'Internal Server Error', detail: err.message });
-    }
-};
-
-
-export const updateActivity = async (req, res) => {
-    try {
-        const { id } = req.params;
-        const allowed = [
-            'title', 'description', 'category', 'modality', 'start_datetime', 'end_datetime', 'hours_value', 'capacity', 'status',
+        const params = [
+            Number(ngo_id),
+            title,
+            description ?? null,
+            category ?? null,
+            modality ?? 'onsite',
+            new Date(start_datetime),
+            new Date(end_datetime),
+            hours_value ?? 0,
+            capacity ?? null,
+            status,
         ];
+
+        const result = await pool.query(sql, params);
+        return res.status(201).json({ ok: true, data: result.rows[0] });
+    } catch (err) {
+        next(err);
+    }
+}
+
+export async function updateActivity(req, res, next) {
+    try {
+        const { activity_id } = req.params;
+
+        const {
+            title,
+            description,
+            category,
+            modality,
+            start_datetime,
+            end_datetime,
+            hours_value,
+            capacity,
+            status,
+        } = req.body;
+
         const sets = [];
         const params = [];
-        allowed.forEach((k) => {
-            if (req.body[k] !== undefined) {
-                params.push(req.body[k]);
-                sets.push(`${k} = $${params.length}`);
-            }
-        });
-        if (!sets.length) return res.status(400).json({ ok: false, error: 'No hay campos para actualizar' });
-        params.push(Number(id));
+        let i = 1;
+        const pushSet = (col, val) => {
+            sets.push(`${col} = $${i++}`);
+            params.push(val);
+        };
 
-        const sql = `UPDATE activities SET ${sets.join(', ')}, updated_at = NOW() WHERE activity_id = $${params.length} RETURNING *;`;
-        const r = await pool.query(sql, params);
-        if (!r.rowCount) return res.status(404).json({ ok: false, error: 'Actividad no encontrada' });
+        if (title !== undefined) pushSet('title', title);
+        if (description !== undefined) pushSet('description', description);
+        if (category !== undefined) pushSet('category', category);
+        if (modality !== undefined) pushSet('modality', modality);
+        if (start_datetime !== undefined) pushSet('start_datetime', new Date(start_datetime));
+        if (end_datetime !== undefined) pushSet('end_datetime', new Date(end_datetime));
+        if (hours_value !== undefined) pushSet('hours_value', hours_value);
+        if (capacity !== undefined) pushSet('capacity', capacity);
+        if (status !== undefined) pushSet('status', status);
 
-        res.json({ ok: true, activity: r.rows[0] });
+        if (!sets.length) {
+            return res.status(400).json({ ok: false, error: 'No fields to update' });
+        }
+
+        sets.push(`updated_at = NOW()`);
+
+        const sql = `
+      UPDATE activities
+      SET ${sets.join(', ')}
+      WHERE activity_id = $${i}
+      RETURNING *;
+    `;
+        params.push(Number(activity_id));
+
+        const result = await pool.query(sql, params);
+        if (!result.rowCount) {
+            return res.status(404).json({ ok: false, error: 'Activity not found' });
+        }
+        return res.json({ ok: true, data: result.rows[0] });
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ ok: false, error: 'Internal Server Error', detail: err.message });
+        next(err);
     }
-};
+}
