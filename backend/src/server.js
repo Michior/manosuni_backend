@@ -7,6 +7,11 @@ import ngoActivitiesRoutes from './routes/ngoActivities.js';
 import ngoVolunteersRoutes from './routes/ngoVolunteers.js';
 import authRoutes from './routes/auth.js';
 
+import activitiesRoutes from './routes/activities.js';
+import volunteersRoutes from './routes/volunteers.js';
+import registrationsRoutes from './routes/registrations.js';
+
+
 const app = express();
 
 
@@ -32,6 +37,11 @@ app.get('/', (_req, res) => res.json({ ok: true, service: 'ManosUni API' }));
 app.use('/api/auth', authRoutes);
 app.use('/api/ngo/activities', ngoActivitiesRoutes);
 app.use('/api/ngo/volunteers', ngoVolunteersRoutes);
+
+app.use('/api/activities', activitiesRoutes);
+app.use('/api/volunteers', volunteersRoutes);
+app.use('/api/registrations', registrationsRoutes);
+
 
 
 app.use((_req, res) => res.status(404).json({ ok: false, error: 'Not Found' }));
